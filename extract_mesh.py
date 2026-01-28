@@ -83,8 +83,8 @@ def extract_mesh_progressive(args, data_pack, voxel_model, init_lv, final_lv, cr
         inside_min = voxel_model.scene_center - 0.5 * voxel_model.inside_extent * args.bbox_scale
         inside_max = voxel_model.scene_center + 0.5 * voxel_model.inside_extent * args.bbox_scale
     else:
-        inside_min = torch.tensor(crop_bbox[0], dtype=torch.float32, device="cuda")
-        inside_max = torch.tensor(crop_bbox[1], dtype=torch.float32, device="cuda")
+        inside_min = torch.tensor(crop_bbox[0], dtype=torch.float32, device=voxel_model.scene_extent.device)
+        inside_max = torch.tensor(crop_bbox[1], dtype=torch.float32, device=voxel_model.scene_extent.device)
 
     # Initialize a dense grid
     vol = SparseVoxelModel(sh_degree=0)
@@ -156,8 +156,8 @@ def extract_mesh(args, data_pack, voxel_model, final_lv, crop_bbox, iso=0):
         inside_min = voxel_model.scene_center - 0.5 * voxel_model.inside_extent * args.bbox_scale
         inside_max = voxel_model.scene_center + 0.5 * voxel_model.inside_extent * args.bbox_scale
     else:
-        inside_min = torch.tensor(crop_bbox[0], dtype=torch.float32, device="cuda")
-        inside_max = torch.tensor(crop_bbox[1], dtype=torch.float32, device="cuda")
+        inside_min = torch.tensor(crop_bbox[0], dtype=torch.float32, device=voxel_model.scene_extent.device)
+        inside_max = torch.tensor(crop_bbox[1], dtype=torch.float32, device=voxel_model.scene_extent.device)
 
     # Clamp levels
     target_lv = voxel_model.outside_level + final_lv
@@ -198,21 +198,25 @@ def extract_mesh(args, data_pack, voxel_model, final_lv, crop_bbox, iso=0):
 
 
 def direct_mc(args, voxel_model, final_lv, crop_bbox):
+    # Determine device from model tensors
+    device = voxel_model.scene_extent.device
+
     # Filter background voxels
     if crop_bbox is None:
         inside_min = voxel_model.scene_center - 0.5 * voxel_model.inside_extent * args.bbox_scale
         inside_max = voxel_model.scene_center + 0.5 * voxel_model.inside_extent * args.bbox_scale
     else:
-        inside_min = torch.tensor(crop_bbox[0], dtype=torch.float32, device="cuda")
-        inside_max = torch.tensor(crop_bbox[1], dtype=torch.float32, device="cuda")
+        inside_min = torch.tensor(crop_bbox[0], dtype=torch.float32, device=device)
+        inside_max = torch.tensor(crop_bbox[1], dtype=torch.float32, device=device)
+
     inside_mask = ((inside_min <= voxel_model.grid_pts_xyz) & (voxel_model.grid_pts_xyz <= inside_max)).all(-1)
     inside_mask = inside_mask[voxel_model.vox_key].any(-1)
     inside_idx = torch.where(inside_mask)[0]
 
-    # Infer iso value for level set
-    vox_level = torch.tensor([voxel_model.outside_level + final_lv], device="cuda")
+    # Infer iso value for level set (ensure tensors live on the model device)
+    vox_level = torch.tensor([voxel_model.outside_level + final_lv], device=device)
     vox_size = octree_utils.level_2_vox_size(voxel_model.scene_extent, vox_level).item()
-    iso_alpha = torch.tensor(0.5, device="cuda")
+    iso_alpha = torch.tensor(0.5, device=device)
     iso_density = activation_utils.alpha2density(iso_alpha, vox_size)
     iso = getattr(activation_utils, f"{voxel_model.density_mode}_inverse")(iso_density)
     sign = -1
@@ -227,8 +231,8 @@ def direct_mc(args, voxel_model, final_lv, crop_bbox):
 
 
 def colorize_pts(args, pts, data_pack):
-    cloest_color = torch.full([len(pts), 3], 0.5, dtype=torch.float32, device="cuda")
-    cloest_dist = torch.full([len(pts)], np.inf, dtype=torch.float32, device="cuda")
+    cloest_color = torch.full([len(pts), 3], 0.5, dtype=torch.float32, device=pts.device)
+    cloest_dist = torch.full([len(pts)], float('inf'), dtype=torch.float32, device=pts.device)
 
     cam_lst = data_pack.get_train_cameras()
 
@@ -373,9 +377,13 @@ if __name__ == "__main__":
     print(f'ss            =: {voxel_model.ss}')
     print(f'n_samp_per_vox=: {voxel_model.n_samp_per_vox}')
     print(f'Voxel level distribution:')
+    model_device = voxel_model.scene_extent.device
     for lv, num in enumerate(voxel_model.octlevel.flatten().bincount().tolist()):
         if num > 0:
-            size = octree_utils.level_2_vox_size(voxel_model.scene_extent, torch.tensor(lv)).item()
+            size = octree_utils.level_2_vox_size(
+                voxel_model.scene_extent,
+                torch.tensor(lv, device=model_device)
+            ).item()
             percen = num / voxel_model.num_voxels * 100
             suffix = ""
             if lv == voxel_model.outside_level + args.final_lv:
@@ -448,7 +456,7 @@ if __name__ == "__main__":
     if args.use_vert_color:
         print("Colorizing vertices")
         with torch.no_grad():
-            pts = torch.tensor(mesh.vertices, dtype=torch.float32, device="cuda")
+            pts = torch.tensor(mesh.vertices, dtype=torch.float32, device=voxel_model.scene_extent.device)
             verts_color = colorize_pts(args, pts, data_pack)
             verts_color = verts_color.cpu().numpy()
         mesh = trimesh.Trimesh(mesh.vertices, mesh.faces, vertex_colors=verts_color)
